@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Audio visualizer</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🎚️%3C/text%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#000;--ink:#b8ffc8;--mute:#3fa85a;--panel:#020a04ee;--line:#0b4a1c;--l:55%;--on:#00ff41;--onink:#000;color-scheme:dark;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+
+
+html{scroll-padding-top:env(safe-area-inset-top,0px);height:100%}
+*,*::before,*::after{box-sizing:inherit}
+body{margin:0;height:100%;display:flex;flex-direction:column;background:var(--bg);color:var(--ink);font-family:"Share Tech Mono",ui-monospace,Menlo,Consolas,monospace}
+.stage{position:relative;flex:1;min-height:0}
+canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+.hint{position:absolute;inset:0;display:grid;place-content:center;text-align:center;padding:24px;pointer-events:none;transition:opacity .4s}
+
+.hint p{margin:0;color:var(--mute);font-size:clamp(1.1rem,3vw,1.6rem)}
+.hint.off{opacity:0}
+.bar{display:flex;flex-wrap:wrap;align-items:center;gap:10px 18px;padding:12px 16px;border-top:1px solid var(--line);background:var(--panel)}
+.grp{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.grp+.grp{padding-left:18px;border-left:1px solid var(--line)}
+button,.btn{font:inherit;font-weight:600;font-size:.92rem;color:var(--ink);background:transparent;border:1px solid var(--line);border-radius:999px;padding:8px 14px;cursor:pointer;line-height:1}
+button:hover,.btn:hover{border-color:var(--mute)}
+button[aria-pressed="true"]{background:var(--on);color:var(--onink);border-color:var(--on)}
+button:focus-visible,.btn:focus-within,input[type=range]:focus-visible{outline:3px solid #00ff41;outline-offset:2px}
+.btn input{position:absolute;opacity:0;width:1px;height:1px}
+label.r{display:flex;align-items:center;gap:8px;font-size:.9rem;color:var(--mute)}
+input[type=range]{width:120px;accent-color:#00ff41}
+#status{font-size:.88rem;color:var(--mute);margin-left:auto;min-height:1.2em}
+@media (max-width:640px){.grp+.grp{padding-left:0;border-left:0}#status{margin-left:0;width:100%}}
+</style>
+</head>
+<body>
+<div class="stage">
+  <canvas id="cv" aria-label="Live audio visualization"></canvas>
+  <div class="hint" id="hint"><div><p>Pick a sound source below to see it move.</p></div></div>
+</div>
+<div class="bar">
+  <div class="grp" role="group" aria-label="Sound source">
+    
+    
+    <label class="btn" id="bFile">Open audio file<input type="file" id="file" accept="audio/*"></label>
+    <button id="bStop">Stop</button>
+  </div>
+  <div class="grp"><label class="r">Sensitivity <input type="range" id="sens" min="0.2" max="2.5" step="0.05" value="0.6"></label></div>
+  <div id="status" role="status" aria-live="polite"></div>
+</div>
+<script>
+(function(){
+const $=s=>document.querySelector(s), cv=$('#cv'), ctx=cv.getContext('2d');
+const hint=$('#hint'), statusEl=$('#status');
+const reduce=matchMedia('(prefers-reduced-motion: reduce)').matches;
+let W=0,H=0,AC,an,out,freq,wave,node,el,active=false,sens=0.6;
+const N=72, sm=new Float32Array(N);
+
+function resize(){const d=devicePixelRatio||1,r=cv.getBoundingClientRect();W=r.width;H=r.height;cv.width=Math.max(1,W*d);cv.height=Math.max(1,H*d);ctx.setTransform(d,0,0,d,0,0);initRain()}
+new ResizeObserver(resize).observe(cv);
+
+function say(m){statusEl.textContent=m||''}
+function init(){
+  if(AC){if(AC.state==='suspended')AC.resume();return}
+  AC=new (window.AudioContext||window.webkitAudioContext)();
+  an=AC.createAnalyser();an.fftSize=2048;an.smoothingTimeConstant=.78;
+  out=AC.createGain();an.connect(out);out.connect(AC.destination);
+  freq=new Uint8Array(an.frequencyBinCount);wave=new Uint8Array(an.fftSize);
+}
+function stop(){
+  
+  
+  if(el){el.pause();el.src='';el=null}
+  if(node){try{node.disconnect()}catch(e){}node=null}
+  active=false;hint.classList.remove('off');say('');
+}
+function go(label){active=true;hint.classList.add('off');say(label)}
+
+
+/* ---------- file ---------- */
+$('#file').addEventListener('change',async e=>{
+  const f=e.target.files[0];if(!f)return;
+  stop();init();out.gain.value=1;
+  el=new Audio();el.src=URL.createObjectURL(f);el.loop=true;
+  node=AC.createMediaElementSource(el);node.connect(an);
+  try{await el.play();go('Playing '+f.name);}catch(err){say('This file could not be played.')}
+  e.target.value='';
+});
+
+$('#bStop').onclick=stop;
+$('#sens').oninput=e=>sens=+e.target.value;
+
+/* ---------- drawing ---------- */
+const css=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const hue=t=>128+22*t; /* greens */
+
+const GL='ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ0123456789ｦ:.=*+-<>';
+const gl=()=>GL[Math.floor(Math.random()*GL.length)];
+let cols=[],fs=16,rows=0;
+function initRain(){
+  fs=W<600?14:18;rows=Math.ceil(H/fs);
+  cols=Array.from({length:Math.ceil(W/fs)},()=>({y:Math.random()*rows,s:.12+Math.random()*.3,len:8+Math.floor(Math.random()*16),c:Array.from({length:rows+30},gl)}));
+}
+function drawRain(now,bass){
+  if(!cols.length)return;
+  ctx.font=fs+'px "Share Tech Mono",monospace';ctx.textBaseline='top';ctx.textAlign='center';
+  const boost=reduce?0:1+bass*3;
+  cols.forEach((c,i)=>{
+    if(!reduce)c.y+=c.s*boost;
+    if(c.y-c.len>rows){c.y=-Math.random()*8;c.s=.12+Math.random()*.3;c.len=8+Math.floor(Math.random()*16)}
+    if(Math.random()<.05)c.c[Math.floor(Math.random()*c.c.length)]=gl();
+    const head=Math.floor(c.y);
+    for(let k=0;k<c.len;k++){
+      const r=head-k;if(r<0||r>rows)continue;
+      const a=Math.pow(1-k/c.len,1.6)*(.28+bass*.5);
+      ctx.fillStyle=k===0?`rgba(190,255,200,${Math.min(1,.5+bass)})`:`rgba(0,255,65,${a})`;
+      ctx.fillText(c.c[r],i*fs+fs/2,r*fs);
+    }
+  });
+}
+
+function bands(now){
+  const bins=active?freq.length:0;
+  for(let i=0;i<N;i++){
+    let v;
+    if(active){
+      const a=Math.floor(2*Math.pow(700/2,i/N)),b=Math.max(a+1,Math.floor(2*Math.pow(700/2,(i+1)/N)));
+      let s=0;for(let k=a;k<b;k++)s+=freq[k];v=s/(b-a)/255;
+      v=Math.min(1,Math.pow(v,1.4)*sens*(1+i/N*.9));
+    }else v=.04+.03*Math.sin(now/700+i*.35);
+    sm[i]=Math.max(v,sm[i]*.9);
+  }
+}
+
+function frame(now){
+  requestAnimationFrame(frame);
+  if(!W||!H)return;
+  if(active){an.getByteFrequencyData(freq);an.getByteTimeDomainData(wave)}
+  bands(now);
+  const L=css('--l')||'60%',bg=css('--bg');
+  let bass=0;for(let i=0;i<6;i++)bass+=sm[i];bass/=6;
+  ctx.fillStyle=bg;ctx.fillRect(0,0,W,H);drawRain(now,bass);
+  
+  const m=Math.min(W,H);
+  ctx.lineCap='round';
+  {
+    const layers=[[0,0],[.5,6],[1,12]];
+    ctx.lineWidth=Math.max(1.3,m*.0039);ctx.lineJoin='round';
+    layers.forEach(([c,dy],li)=>{
+      ctx.strokeStyle=`hsl(${hue(c)} 85% ${L} / ${1-li*.28})`;ctx.beginPath();
+      const pts=300,stepI=Math.floor(wave.length/pts);
+      for(let p=0;p<=pts;p++){
+        const v=active?(wave[p*stepI]-128)/128*sens*1.4:Math.sin(now/600+p*.06+li)*.03;
+        const x=p/pts*W,y=H/2+v*H*.38+dy*(li?1:0)*Math.sin(p*.05+now/900);
+        p?ctx.lineTo(x,y):ctx.moveTo(x,y);
+      }
+      ctx.stroke();
+    });
+  }
+}
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
