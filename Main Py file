@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""
-Audio visualizer: Matrix-style glyph rain + 3-layer oscilloscope wave.
-
-Python port of "Audio visualizer.html".
+"
 
 Install:
     pip install pygame numpy sounddevice soundfile
