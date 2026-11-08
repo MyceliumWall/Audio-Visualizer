@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Audio visualizer</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🎚️%3C/text%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#000;--ink:#c46a6a;--mute:#8f3a3a;--panel:#0a0202ee;--line:#6B0505;--wave:#780606;--on:#780606;--onink:#ffd6d6;color-scheme:dark;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+
+
+html{scroll-padding-top:env(safe-area-inset-top,0px);height:100%}
+*,*::before,*::after{box-sizing:inherit}
+body{margin:0;height:100%;display:flex;flex-direction:column;background:var(--bg);color:var(--ink);font-family:"Share Tech Mono",ui-monospace,Menlo,Consolas,monospace}
+.stage{position:relative;flex:1;min-height:0}
+canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+.hint{position:absolute;inset:0;display:grid;place-content:center;text-align:center;padding:24px;pointer-events:none;transition:opacity .4s}
+
+.hint p{margin:0;color:var(--mute);font-size:clamp(1.1rem,3vw,1.6rem)}
+.hint.off{opacity:0}
+.bar{display:flex;flex-wrap:wrap;align-items:center;gap:10px 18px;padding:12px 16px;border-top:1px solid var(--line);background:var(--panel)}
+.grp{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.grp+.grp{padding-left:18px;border-left:1px solid var(--line)}
+button,.btn{font:inherit;font-weight:600;font-size:.92rem;color:var(--ink);background:transparent;border:1px solid var(--line);border-radius:999px;padding:8px 14px;cursor:pointer;line-height:1}
+button:hover,.btn:hover{border-color:var(--mute)}
+button[aria-pressed="true"]{background:var(--on);color:var(--onink);border-color:var(--on)}
+button:focus-visible,.btn:focus-within,input[type=range]:focus-visible{outline:3px solid #c23a3a;outline-offset:2px}
+.btn input{position:absolute;opacity:0;width:1px;height:1px}
+label.r{display:flex;align-items:center;gap:8px;font-size:.9rem;color:var(--mute)}
+input[type=range]{width:120px;accent-color:#780606}
+#status{font-size:.88rem;color:var(--mute);margin-left:auto;min-height:1.2em}
+@media (max-width:640px){.grp+.grp{padding-left:0;border-left:0}#status{margin-left:0;width:100%}}
+.dd{position:relative}
+.dd summary{list-style:none;font-weight:600;font-size:.92rem;color:var(--ink);border:1px solid var(--line);border-radius:999px;padding:8px 14px;cursor:pointer;line-height:1;user-select:none}
+.dd summary::-webkit-details-marker{display:none}
+.dd summary::after{content:" ▾"}
+.dd summary:hover,.dd[open] summary{border-color:var(--mute)}
+.dd summary:focus-visible{outline:3px solid #c23a3a;outline-offset:2px}
+.menu{position:absolute;left:0;bottom:calc(100% + 8px);min-width:220px;padding:12px 14px;background:#0a0202;border:1px solid var(--line);border-radius:12px;display:flex;flex-direction:column;gap:12px;z-index:5}
+.menu label{display:flex;align-items:center;gap:10px;font-size:.9rem;color:var(--ink);cursor:pointer}
+.menu input{width:16px;height:16px;accent-color:#780606;margin:0}
+</style>
+</head>
+<body>
+<div class="stage">
+  <canvas id="cv" aria-label="Live audio visualization"></canvas>
+  <div class="hint" id="hint"><div><p>Pick a sound source below to see it move.</p></div></div>
+</div>
+<div class="bar">
+  <div class="grp" role="group" aria-label="Sound source">
+    
+    
+    <label class="btn" id="bFile">Open audio file<input type="file" id="file" accept="audio/*"></label>
+    <details class="dd" id="waveDD"><summary>Waves</summary><div class="menu" id="waveMenu" role="group" aria-label="Waves to show"><label><input type="checkbox" data-i="0" checked> High · 2–10 kHz</label><label><input type="checkbox" data-i="1" checked> Mid · 250 Hz–2 kHz</label><label><input type="checkbox" data-i="2" checked> Low · 40–250 Hz</label></div></details>
+    <button id="bStop">Stop</button>
+  </div>
+  <div class="grp"><label class="r">Volume <input type="range" id="vol" min="0" max="1" step="0.01" value="0.8"></label></div>
+  <div id="status" role="status" aria-live="polite"></div>
+</div>
+<script>
+(function(){
+const $=s=>document.querySelector(s), cv=$('#cv'), ctx=cv.getContext('2d');
+const hint=$('#hint'), statusEl=$('#status');
+let W=0,H=0,AC,inp,out,node,el,active=false,vol=.8;
+const SENS=.2/.6; /* wave gain, fixed at the lowest sensitivity */
+/* three frequency ranges, drawn top to bottom. win = how many samples of the signal each wave shows
+   (shorter for higher ranges so their cycles stay readable) */
+const BANDS=[
+  {name:'High',range:'2\u201310 kHz',lo:2000,hi:10000,win:256},
+  {name:'Mid',range:'250 Hz\u20132 kHz',lo:250,hi:2000,win:640},
+  {name:'Low',range:'40\u2013250 Hz',lo:40,hi:250,win:1536}
+];
+
+BANDS.forEach(b=>b.show=true); /* all three waves on by default */
+function resize(){const d=devicePixelRatio||1,r=cv.getBoundingClientRect();W=r.width;H=r.height;cv.width=Math.max(1,W*d);cv.height=Math.max(1,H*d);ctx.setTransform(d,0,0,d,0,0)}
+new ResizeObserver(resize).observe(cv);
+
+function say(m){statusEl.textContent=m||''}
+function init(){
+  if(AC){if(AC.state==='suspended')AC.resume();return}
+  AC=new (window.AudioContext||window.webkitAudioContext)();
+  /* audible path is untouched: inp -> out -> speakers. The band filters only feed the visuals. */
+  inp=AC.createGain();
+  out=AC.createGain();out.gain.value=vol;inp.connect(out);out.connect(AC.destination);
+  BANDS.forEach(b=>{
+    const f=(t,hz)=>{const x=AC.createBiquadFilter();x.type=t;x.frequency.value=hz;return x};
+    /* band-pass made of two cascaded high-pass + two low-pass filters (steep 24 dB/octave edges) */
+    const chain=[f('highpass',b.lo),f('highpass',b.lo),f('lowpass',b.hi),f('lowpass',b.hi)];
+    inp.connect(chain[0]);
+    for(let i=0;i<chain.length-1;i++)chain[i].connect(chain[i+1]);
+    b.an=AC.createAnalyser();b.an.fftSize=2048;b.an.smoothingTimeConstant=0;
+    chain[chain.length-1].connect(b.an);
+    b.buf=new Float32Array(b.an.fftSize);b.lvl=.05;b.agc=1;
+  });
+}
+function stop(){
+  if(el){el.pause();el.src='';el=null}
+  if(node){try{node.disconnect()}catch(e){}node=null}
+  active=false;hint.classList.remove('off');say('');
+}
+function go(label){active=true;hint.classList.add('off');say(label)}
+
+/* ---------- file ---------- */
+$('#file').addEventListener('change',async e=>{
+  const f=e.target.files[0];if(!f)return;
+  stop();init();out.gain.value=vol;
+  el=new Audio();el.src=URL.createObjectURL(f);el.loop=true;
+  node=AC.createMediaElementSource(el);node.connect(inp);
+  try{await el.play();go('Playing '+f.name);}catch(err){say('This file could not be played.')}
+  e.target.value='';
+});
+
+$('#bStop').onclick=stop;
+$('#vol').oninput=e=>{vol=+e.target.value;if(out)out.gain.value=vol};
+document.querySelectorAll('#waveMenu input').forEach(cb=>cb.onchange=()=>{BANDS[+cb.dataset.i].show=cb.checked});
+document.addEventListener('click',e=>{const d=$('#waveDD');if(d.open&&!d.contains(e.target))d.open=false});
+
+/* ---------- drawing ---------- */
+const css=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+
+function frame(now){
+  requestAnimationFrame(frame);
+  if(!W||!H)return;
+  const wave=css('--wave')||'#780606',bg=css('--bg'),line=css('--line'),ink=css('--ink');
+  ctx.fillStyle=bg;ctx.fillRect(0,0,W,H);
+  const m=Math.min(W,H),n=BANDS.length,cy=H/2;
+  /* one shared grid for all three waves */
+  ctx.lineWidth=1;ctx.strokeStyle=line;ctx.beginPath();
+  for(let k=1;k<8;k++){const y=H*k/8;ctx.moveTo(0,y);ctx.lineTo(W,y)}
+  for(let k=1;k<12;k++){const x=W*k/12;ctx.moveTo(x,0);ctx.lineTo(x,H)}
+  ctx.stroke();
+  ctx.beginPath();ctx.moveTo(0,cy);ctx.lineTo(W,cy);ctx.stroke();
+  ctx.lineCap='round';ctx.lineJoin='round';
+  ctx.font='12px "Share Tech Mono",ui-monospace,monospace';ctx.textBaseline='top';ctx.textAlign='left';
+
+  let row=0;
+  BANDS.forEach((b,li)=>{
+    if(!b.show)return;
+    const lw=Math.max(.8,m*.0022)*[1.1,1.21,1.331][li]; /* same colour, so thickness tells the ranges apart: high +10%, each range below is 10% thicker than the one above it */
+    let start=0;
+    if(active){
+      const buf=b.buf;b.an.getFloatTimeDomainData(buf);
+      let e=0;for(let k=0;k<buf.length;k++)e+=buf[k]*buf[k];
+      const rms=Math.sqrt(e/buf.length);
+      b.lvl+=(rms-b.lvl)*(rms>b.lvl?.25:.015); /* fast attack, slow release */
+      b.agc=Math.min(40,Math.max(.4,.25/Math.max(b.lvl,.003))); /* each range levels itself */
+      /* start each wave at a rising zero-crossing so it holds steady on screen */
+      const lim=buf.length-b.win;
+      for(let k=1;k<lim;k++){if(buf[k-1]<0&&buf[k]>=0){start=k;break}}
+    }
+    /* legend */
+    ctx.lineWidth=lw;ctx.strokeStyle=wave;
+    ctx.beginPath();ctx.moveTo(14,12+row*18+7);ctx.lineTo(38,12+row*18+7);ctx.stroke();
+    ctx.fillStyle=ink;ctx.fillText(b.name+' \u00b7 '+b.range,48,12+row*18);row++;
+
+    const path=new Path2D();
+    const pts=300;
+    for(let p=0;p<=pts;p++){
+      const v=active
+        ?Math.tanh(b.buf[start+Math.floor(p/pts*(b.win-1))]*b.agc*SENS*2)
+        :Math.sin(now/700+p*(.05+li*.01)+li*.8)*.06;
+      const x=p/pts*W,y=cy+v*H*.34;
+      p?path.lineTo(x,y):path.moveTo(x,y);
+    }
+    /* red body with a soft red glow, then a thin white core with its own white glow on top */
+    ctx.save();
+    ctx.lineWidth=lw;ctx.strokeStyle=wave;
+    ctx.shadowColor='rgba(255,40,40,.85)';ctx.shadowBlur=18;
+    ctx.stroke(path);
+    ctx.lineWidth=Math.max(.6,lw*.4);ctx.strokeStyle='#fff';
+    ctx.shadowColor='rgba(255,255,255,.95)';ctx.shadowBlur=8;
+    ctx.stroke(path);
+    ctx.restore();
+  });
+}
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
