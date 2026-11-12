@@ -56,7 +56,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--onink);outline-
 
 <script>
 const BG="#000",INK="#c46a6a",MUTE="#8f3a3a",LINE="#6b0505",WAVE="#780606",GLOW_OUTER="#2a0202",GLOW_INNER="#4d0404";
-const SENS=0.2/0.6, FFT=2048, SPEC_FFT=4096, PTS=300, NBARS=72, F_LO=20, F_HI=20000;
+const SENS=0.2/0.6, FFT=2048, SPEC_FFT=4096, PTS=300, NBARS=144, F_LO=20, F_HI=20000;
 const MODES=["Waves","Bars","Mountain"];
 const BANDS=[
   {name:"High",range:"2–10 kHz",     lo:2000,hi:10000,win:256},
@@ -153,7 +153,7 @@ function grid(){
 function hint(){
   g.fillStyle=MUTE;g.font='20px "Share Tech Mono",Menlo,Consolas,monospace';
   g.textAlign="center";g.textBaseline="middle";
-  g.fillText("Pick a sound source below",W/2,H/2-20);
+  g.fillText("Pick a sound source below",W/2,H/2-70);
 }
 function legend(row,name,range,lw){
   const ly=12+row*18;
@@ -208,7 +208,7 @@ function drawBars(){
   bars.forEach((v,i)=>{const x0=i*slot+(slot-bw)/2;bar(x0,base-Math.max(2,v*maxh),x0+bw,base,gl)});
 }
 function drawMountain(){
-  const lw=Math.max(0.8,Math.min(W,H)*0.0022)*1.21,base=H*0.94,maxh=H*0.8,n=200;
+  const lw=Math.max(0.8,Math.min(W,H)*0.0022)*1.21,base=H*0.94,maxh=H*0.8,n=602;
   let v=[];
   for(let i=0;i<n;i++){const p=i/(n-1)*(NBARS-1),k=Math.min(NBARS-2,Math.floor(p)),f=p-k;v.push(bars[k]*(1-f)+bars[k+1]*f)}
   v=v.map((_,i)=>{let s=0;for(let j=-4;j<=4;j++)s+=v[Math.max(0,Math.min(n-1,i+j))];return s/9});
@@ -226,7 +226,7 @@ function frame(){
   if(playing){ mode==="Waves"?analyse():spectrum(); }
   else{
     if(mode!=="Waves")hint();
-    for(let i=0;i<NBARS;i++)bars[i]=0.08+0.05*Math.sin(now/700+i*0.2); // gentle idle motion
+    for(let i=0;i<NBARS;i++)bars[i]=0.08+0.05*Math.sin(now/700+i*0.1); // gentle idle motion
   }
   if(mode==="Waves"){drawWaves(now);if(!playing)hint()}
   else{
