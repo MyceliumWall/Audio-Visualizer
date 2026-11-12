@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Audio visualizer</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap">
+<style>
+:root{
+  --bg:#000;--ink:#c46a6a;--mute:#8f3a3a;--panel:#0a0202;--line:#6b0505;--wave:#780606;--onink:#ffd6d6;
+  color-scheme:dark;box-sizing:border-box;
+  padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);
+}
+html{height:100%;scroll-padding-top:env(safe-area-inset-top,0px);background:var(--bg)}
+*,*::before,*::after{box-sizing:inherit}
+body{margin:0;height:100%;display:flex;flex-direction:column;background:var(--bg);color:var(--ink);
+  font:14px/1.2 "Share Tech Mono",Menlo,Consolas,"Courier New",monospace}
+#stage{flex:1;min-height:0;position:relative}
+canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+#bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;padding:10px 12px;background:var(--panel);
+  border:1px solid var(--line)}
+button,.menu-btn{font:inherit;font-weight:700;color:var(--ink);background:var(--panel);border:1px solid var(--ink);
+  padding:6px 12px;cursor:pointer;border-radius:0}
+button:hover,button:focus-visible,.dd.open>button{background:var(--wave);color:var(--onink);outline:none}
+button:focus-visible,input:focus-visible{outline:2px solid var(--onink);outline-offset:2px}
+.dd{position:relative}
+.panel{position:absolute;bottom:calc(100% + 4px);left:0;min-width:220px;background:var(--panel);
+  border:1px solid var(--ink);padding:4px 0;z-index:5}
+.panel[hidden]{display:none}
+.panel label{display:flex;align-items:center;gap:10px;padding:7px 12px;cursor:pointer;color:var(--ink)}
+.panel label:hover{background:var(--wave);color:var(--onink)}
+.panel input{accent-color:var(--onink);margin:0}
+#vol{display:flex;align-items:center;gap:8px;margin-left:12px;color:var(--mute)}
+#vol input{width:120px;accent-color:var(--ink)}
+#status{margin-left:auto;color:var(--mute);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#file{display:none}
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="cv"></canvas></div>
+<div id="bar">
+  <button id="open" type="button">Open audio file</button>
+  <input id="file" type="file" accept="audio/*,.flac,.ogg,.oga,.aif,.aiff">
+  <div class="dd" id="ddMode">
+    <button type="button" aria-haspopup="true" aria-expanded="false">Mode ▾</button>
+    <div class="panel" id="modes" hidden></div>
+  </div>
+  <div class="dd" id="ddWaves" hidden>
+    <button type="button" aria-haspopup="true" aria-expanded="false">Waves ▾</button>
+    <div class="panel" id="waves" hidden></div>
+  </div>
+  <button id="stop" type="button">Stop</button>
+  <label id="vol">Volume <input id="volume" type="range" min="0" max="1" step="0.01" value="0.8"></label>
+  <div id="status" role="status" aria-live="polite"></div>
+</div>
+
+<script>
+const BG="#000",INK="#c46a6a",MUTE="#8f3a3a",LINE="#6b0505",WAVE="#780606",GLOW_OUTER="#2a0202",GLOW_INNER="#4d0404";
+const SENS=0.2/0.6, FFT=2048, SPEC_FFT=4096, PTS=300, NBARS=72, F_LO=20, F_HI=20000;
+const MODES=["Waves","Bars","Mountain"];
+const BANDS=[
+  {name:"High",range:"2–10 kHz",     lo:2000,hi:10000,win:256},
+  {name:"Mid", range:"250 Hz–2 kHz", lo:250, hi:2000, win:640},
+  {name:"Low", range:"40–250 Hz",    lo:40,  hi:250,  win:1536},
+].map(b=>({...b,show:true,lvl:0.05,agc:1,start:0,buf:new Float32Array(FFT),an:null}));
+
+const cv=document.getElementById("cv"), g=cv.getContext("2d");
+let W=1,H=1,dpr=1,mode=MODES[0],bars=new Float64Array(NBARS),peak=1e-3;
+const t0=performance.now();
+
+/* ---------- audio ---------- */
+let actx=null,src=null,gain=null,spec=null,playing=false,volume=0.8;
+const fd=new Float32Array(SPEC_FFT/2);
+
+function stop(){
+  if(src){try{src.stop()}catch(e){} try{src.disconnect()}catch(e){} src=null}
+  playing=false;
+}
+async function loadFile(file){
+  stop(); say("");
+  try{
+    actx=actx||new (window.AudioContext||window.webkitAudioContext)();
+    await actx.resume();
+    const buf=await actx.decodeAudioData(await file.arrayBuffer());
+    const sr=actx.sampleRate;
+    src=actx.createBufferSource(); src.buffer=buf; src.loop=true;
+    gain=actx.createGain(); gain.gain.value=volume;
+    BANDS.forEach(b=>{
+      const hi=Math.min(b.hi,0.45*sr);
+      // band-pass = two cascaded high-pass + two low-pass biquads (24 dB/octave edges)
+      let prev=src;
+      [["highpass",b.lo],["highpass",b.lo],["lowpass",hi],["lowpass",hi]].forEach(([type,f])=>{
+        const n=actx.createBiquadFilter(); n.type=type; n.frequency.value=f;
+        prev.connect(n); prev=n;
+      });
+      b.an=actx.createAnalyser(); b.an.fftSize=FFT; prev.connect(b.an);
+      b.lvl=0.05; b.agc=1;
+    });
+    spec=actx.createAnalyser(); spec.fftSize=SPEC_FFT; spec.smoothingTimeConstant=0;
+    src.connect(spec);
+    src.connect(gain); gain.connect(actx.destination); // visuals read the signal before the volume control
+    src.start();
+    playing=true; bars.fill(0); peak=1e-3;
+    say("Playing "+file.name);
+  }catch(e){
+    stop(); say("This file couldn’t be played. Try a WAV, FLAC, OGG or MP3.");
+  }
+}
+
+/* ---------- analysis ---------- */
+function analyse(){
+  for(const b of BANDS){
+    b.an.getFloatTimeDomainData(b.buf);
+    const y=b.buf; let s=0;
+    for(let i=0;i<FFT;i++) s+=y[i]*y[i];
+    const rms=Math.sqrt(s/FFT);
+    b.lvl+=(rms-b.lvl)*(rms>b.lvl?0.25:0.015);                       // fast attack, slow release
+    b.agc=Math.min(40,Math.max(0.4,0.25/Math.max(b.lvl,0.003)));     // each range levels itself
+    const lim=FFT-b.win; b.start=0;                                   // start at a rising zero-crossing
+    for(let i=1;i<lim;i++){ if(y[i-1]<0&&y[i]>=0){b.start=i;break} }
+  }
+}
+function spectrum(){
+  spec.getFloatFrequencyData(fd);
+  const sr=actx.sampleRate, df=sr/SPEC_FFT, top=Math.min(F_HI,0.45*sr);
+  const mag=k=>{const d=fd[Math.min(fd.length-1,k)];return d>-200?Math.pow(10,d/20)*4:0};
+  const vals=new Float64Array(NBARS); let mx=0;
+  for(let i=0;i<NBARS;i++){
+    const lo=F_LO*Math.pow(top/F_LO,i/NBARS), hi=F_LO*Math.pow(top/F_LO,(i+1)/NBARS), c=Math.sqrt(lo*hi);
+    let m=-1;
+    for(let k=Math.ceil(lo/df);k*df<hi;k++) m=Math.max(m,mag(k));
+    if(m<0){const p=c/df,k=Math.floor(p),f=p-k; m=mag(k)*(1-f)+mag(k+1)*f}
+    vals[i]=m*Math.sqrt(c/200);                                       // tilt: music falls off towards the highs
+    mx=Math.max(mx,vals[i]);
+  }
+  peak=Math.max(peak*0.995,mx,1e-4);                                  // slow auto-gain
+  for(let i=0;i<NBARS;i++){
+    const v=Math.sqrt(vals[i]/peak);
+    bars[i]+=(v-bars[i])*(v>bars[i]?0.6:0.12);
+  }
+}
+
+/* ---------- drawing helpers ---------- */
+function path(pts){g.beginPath();g.moveTo(pts[0][0],pts[0][1]);for(let i=1;i<pts.length;i++)g.lineTo(pts[i][0],pts[i][1])}
+function stroke(pts,color,w){path(pts);g.strokeStyle=color;g.lineWidth=w;g.lineCap="round";g.lineJoin="round";g.stroke()}
+function seg(x0,y0,x1,y1,color,w){stroke([[x0,y0],[x1,y1]],color,w)}
+function grid(){
+  g.lineWidth=1;g.strokeStyle=LINE;g.beginPath();
+  for(let k=1;k<8;k++){const y=Math.round(H*k/8)+0.5;g.moveTo(0,y);g.lineTo(W,y)}
+  for(let k=1;k<12;k++){const x=Math.round(W*k/12)+0.5;g.moveTo(x,0);g.lineTo(x,H)}
+  g.stroke();
+}
+function hint(){
+  g.fillStyle=MUTE;g.font='20px "Share Tech Mono",Menlo,Consolas,monospace';
+  g.textAlign="center";g.textBaseline="middle";
+  g.fillText("Pick a sound source below",W/2,H/2-20);
+}
+function legend(row,name,range,lw){
+  const ly=12+row*18;
+  seg(14,ly+7,38,ly+7,WAVE,lw);
+  g.fillStyle=INK;g.font='12px "Share Tech Mono",Menlo,Consolas,monospace';
+  g.textAlign="left";g.textBaseline="top";
+  g.fillText(name+" · "+range,48,ly);
+}
+function glowLine(pts,lw,core){
+  g.save();
+  g.shadowColor="rgba(255,41,41,0.85)";g.shadowBlur=18*dpr;stroke(pts,WAVE,lw);
+  g.shadowColor="rgba(255,255,255,0.95)";g.shadowBlur=8*dpr;stroke(pts,"#fff",core);
+  g.restore();
+}
+
+/* ---------- three-range waves ---------- */
+function drawWaves(now){
+  const cy=H/2,m=Math.min(W,H),shown=[];
+  BANDS.forEach((b,li)=>{
+    if(!b.show)return;
+    const lw=Math.max(0.8,m*0.0022)*[1.1,1.21,1.331][li];          // each range is 10% thicker
+    const pts=[];
+    for(let p=0;p<=PTS;p++){
+      let v;
+      if(playing){
+        const s=b.buf[b.start+Math.floor(p/PTS*(b.win-1))];
+        v=Math.tanh(s*b.agc*SENS*2);
+      }else v=Math.sin(now/700+p*(0.05+li*0.01)+li*0.8)*0.06;
+      pts.push([p/PTS*W,cy+v*H*0.34]);
+    }
+    shown.push({b,pts,lw});
+  });
+  shown.forEach(s=>glowLine(s.pts,s.lw,Math.max(0.6,s.lw*0.4)));    // glow first, grid over it, then the lines
+  grid();
+  shown.forEach((s,row)=>{
+    legend(row,s.b.name,s.b.range,s.lw);
+    stroke(s.pts,WAVE,s.lw);
+    stroke(s.pts,"#fff",Math.max(0.6,s.lw*0.4));
+  });
+}
+
+/* ---------- spectrum modes ---------- */
+function bar(x0,y0,x1,y1,gl){
+  g.fillStyle=GLOW_OUTER;g.fillRect(x0-gl*2,y0-gl*2,x1-x0+gl*4,y1-y0+gl*4);
+  g.fillStyle=GLOW_INNER;g.fillRect(x0-gl,y0-gl,x1-x0+gl*2,y1-y0+gl*2);
+  g.fillStyle=WAVE;g.fillRect(x0,y0,x1-x0,y1-y0);
+  const cx=(x0+x1)/2;seg(cx,y0,cx,y1,"#fff",Math.max(0.6,(x1-x0)*0.12));
+}
+function geom(){const slot=W/NBARS,bw=slot*0.6;return[slot,bw,Math.max(1,(slot-bw)*0.17)]}
+function drawBars(){
+  const[slot,bw,gl]=geom(),base=H*0.94,maxh=H*0.8;
+  bars.forEach((v,i)=>{const x0=i*slot+(slot-bw)/2;bar(x0,base-Math.max(2,v*maxh),x0+bw,base,gl)});
+}
+function drawMountain(){
+  const lw=Math.max(0.8,Math.min(W,H)*0.0022)*1.21,base=H*0.94,maxh=H*0.8,n=200;
+  let v=[];
+  for(let i=0;i<n;i++){const p=i/(n-1)*(NBARS-1),k=Math.min(NBARS-2,Math.floor(p)),f=p-k;v.push(bars[k]*(1-f)+bars[k+1]*f)}
+  v=v.map((_,i)=>{let s=0;for(let j=-4;j<=4;j++)s+=v[Math.max(0,Math.min(n-1,i+j))];return s/9});
+  const pts=v.map((y,i)=>[i/(n-1)*W,base-Math.max(y,0.01)*maxh]);
+  path(pts);g.lineTo(W,base);g.lineTo(0,base);g.closePath();g.fillStyle=GLOW_OUTER;g.fill();
+  stroke(pts,GLOW_INNER,lw*3);stroke(pts,WAVE,lw);stroke(pts,"#fff",Math.max(0.6,lw*0.4));
+}
+/* ---------- frame loop ---------- */
+function frame(){
+  const now=performance.now()-t0;
+  g.setTransform(dpr,0,0,dpr,0,0);g.clearRect(0,0,W,H);g.fillStyle=BG;g.fillRect(0,0,W,H);
+  const wavesOn=playing&&mode==="Waves";
+  ddWaves.hidden=!wavesOn; if(!wavesOn) wavesPanel.hidden=true;
+  if(mode!=="Waves")grid();
+  if(playing){ mode==="Waves"?analyse():spectrum(); }
+  else{
+    if(mode!=="Waves")hint();
+    for(let i=0;i<NBARS;i++)bars[i]=0.08+0.05*Math.sin(now/700+i*0.2); // gentle idle motion
+  }
+  if(mode==="Waves"){drawWaves(now);if(!playing)hint()}
+  else{
+    legend(0,mode,F_LO+" Hz–"+(F_HI/1000)+" kHz",Math.max(0.8,Math.min(W,H)*0.0022));
+    ({"Bars":drawBars,"Mountain":drawMountain})[mode]();
+  }
+  requestAnimationFrame(frame);
+}
+function resize(){
+  const r=cv.getBoundingClientRect();dpr=window.devicePixelRatio||1;
+  W=Math.max(1,r.width);H=Math.max(1,r.height);
+  cv.width=Math.round(W*dpr);cv.height=Math.round(H*dpr);
+}
+
+/* ---------- controls ---------- */
+const $=id=>document.getElementById(id),ddWaves=$("ddWaves"),wavesPanel=$("waves"),modesPanel=$("modes");
+function say(t){$("status").textContent=t||""}
+function closeMenus(){document.querySelectorAll(".panel").forEach(p=>{p.hidden=true});document.querySelectorAll(".dd").forEach(d=>{d.classList.remove("open");const b=d.querySelector("button");b&&b.setAttribute("aria-expanded","false")})}
+function wireMenu(dd){
+  const btn=dd.querySelector("button"),panel=dd.querySelector(".panel");
+  btn.addEventListener("click",e=>{
+    e.stopPropagation();const wasOpen=!panel.hidden;closeMenus();
+    panel.hidden=wasOpen;dd.classList.toggle("open",!wasOpen);btn.setAttribute("aria-expanded",String(!wasOpen));
+  });
+  panel.addEventListener("click",e=>e.stopPropagation());
+}
+MODES.forEach((name,i)=>{
+  const l=document.createElement("label");
+  l.innerHTML='<input type="radio" name="mode"'+(i===0?" checked":"")+'> <span></span>';
+  l.querySelector("span").textContent=name;
+  l.querySelector("input").addEventListener("change",()=>{mode=name;closeMenus()});
+  modesPanel.appendChild(l);
+});
+BANDS.forEach(b=>{
+  const l=document.createElement("label");
+  l.innerHTML='<input type="checkbox" checked> <span></span>';
+  l.querySelector("span").textContent=b.name+" · "+b.range;
+  l.querySelector("input").addEventListener("change",e=>{b.show=e.target.checked});
+  wavesPanel.appendChild(l);
+});
+document.querySelectorAll(".dd").forEach(wireMenu);
+document.addEventListener("click",closeMenus);
+document.addEventListener("keydown",e=>{if(e.key==="Escape")closeMenus()});
+$("open").addEventListener("click",()=>$("file").click());
+$("file").addEventListener("change",e=>{const f=e.target.files[0];if(f)loadFile(f);e.target.value=""});
+$("stop").addEventListener("click",()=>{stop();say("")});
+$("volume").addEventListener("input",e=>{volume=+e.target.value;if(gain)gain.gain.value=volume});
+new ResizeObserver(resize).observe(cv);
+window.addEventListener("resize",resize);
+resize();requestAnimationFrame(frame);
+</script>
+</body>
+</html>
