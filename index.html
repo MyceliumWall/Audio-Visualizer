@@ -41,6 +41,7 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--onink);outline-
 <div id="bar">
   <button id="open" type="button">Open audio file</button>
   <input id="file" type="file" accept="audio/*,.flac,.ogg,.oga,.aif,.aiff">
+  <button id="tab" type="button">Capture tab audio</button>
   <div class="dd" id="ddMode">
     <button type="button" aria-haspopup="true" aria-expanded="false">Mode ▾</button>
     <div class="panel" id="modes" hidden></div>
@@ -73,11 +74,17 @@ let W=1,H=1,dpr=1,mode=MODES[0],bars=new Float64Array(NBARS),peak=1e-3;
 const t0=performance.now();
 
 /* ---------- audio ---------- */
-let actx=null,src=null,gain=null,spec=null,playing=false,volume=0.8;
+let actx=null,src=null,gain=null,spec=null,playing=false,volume=0.8,stream=null;
 const fd=new Float32Array(SPEC_FFT/2);
 
+function volUI(on){                                            // the volume slider only applies to files, not to captured tab audio
+  $("volume").disabled=!on;$("vol").style.opacity=on?"":"0.5";
+  $("vol").title=on?"":"Not used for tab audio: change the volume in the tab you are capturing";
+}
 function stop(){
   if(src){try{src.stop()}catch(e){} try{src.disconnect()}catch(e){} src=null}
+  if(stream){stream.getTracks().forEach(t=>{t.onended=null;try{t.stop()}catch(e){}});stream=null}
+  volUI(true);
   playing=false;
 }
 async function loadFile(file){
@@ -86,8 +93,18 @@ async function loadFile(file){
     actx=actx||new (window.AudioContext||window.webkitAudioContext)();
     await actx.resume();
     const buf=await actx.decodeAudioData(await file.arrayBuffer());
-    const sr=actx.sampleRate;
     src=actx.createBufferSource(); src.buffer=buf; src.loop=true;
+    buildGraph(buf.numberOfChannels>1,true);
+    src.start();
+    playing=true; bars.fill(0); sgClear(); peak=1e-3;
+    say("Playing "+file.name);
+  }catch(e){
+    stop(); say("This file couldn’t be played. Try a WAV, FLAC, OGG or MP3.");
+  }
+}
+/* wires the current `src` to every analyser; monitor=true also sends it to the speakers */
+function buildGraph(stereo,monitor){
+    const sr=actx.sampleRate;
     gain=actx.createGain(); gain.gain.value=volume;
     BANDS.forEach(b=>{
       const hi=Math.min(b.hi,0.45*sr);
@@ -104,16 +121,40 @@ async function loadFile(file){
     src.connect(spec);
     SGP.forEach(p=>{p.an=actx.createAnalyser();p.an.fftSize=p.fft;p.an.smoothingTimeConstant=0;src.connect(p.an)});
     /* Lissajous: one analyser chain per curve (left/right pair for stereo files) */
-    stereoFile=buf.numberOfChannels>1;
+    stereoFile=stereo;
     lisBuild();
     {const st=$("lisSt");st.disabled=!stereoFile;st.parentNode.style.opacity=stereoFile?"":"0.5";
-     st.parentNode.querySelector("span").textContent=stereoFile?"Stereo L/R":"Stereo L/R (mono file)"}
-    src.connect(gain); gain.connect(actx.destination); // visuals read the signal before the volume control
-    src.start();
+     st.parentNode.querySelector("span").textContent=stereoFile?"Stereo L/R":"Stereo L/R (mono source)"}
+    if(monitor){src.connect(gain); gain.connect(actx.destination)} // visuals read the signal before the volume control
+}
+
+/* ---------- tab audio capture (Chrome / Edge on desktop) ---------- */
+const TAB_OK=!!(navigator.mediaDevices&&navigator.mediaDevices.getDisplayMedia);
+async function connectTabAudio(){
+  stop(); say("");
+  try{
+    const pp=document.permissionsPolicy||document.featurePolicy;
+    if(pp&&pp.allowsFeature&&!pp.allowsFeature("display-capture")){
+      say("Tab capture is blocked where this page is embedded. Open the page in its own browser tab.");return;
+    }
+    actx=actx||new (window.AudioContext||window.webkitAudioContext)();
+    await actx.resume();
+    const s=await navigator.mediaDevices.getDisplayMedia({
+      video:true,                                              // Chrome requires video; it is ignored
+      audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false,channelCount:2}
+    });
+    const at=s.getAudioTracks();
+    if(!at.length){s.getTracks().forEach(t=>t.stop());say("No audio was shared. Choose a browser tab and tick “Share tab audio”.");return}
+    stream=s;
+    s.getTracks().forEach(t=>{t.onended=()=>{stop();say("Tab sharing ended.")}});
+    src=actx.createMediaStreamSource(new MediaStream(at));
+    const ch=at[0].getSettings().channelCount;
+    buildGraph(ch==null||ch>1,false);                          // not sent to the speakers, or it would play twice
+    volUI(false);
     playing=true; bars.fill(0); sgClear(); peak=1e-3;
-    say("Playing "+file.name);
+    say("Capturing tab audio");
   }catch(e){
-    stop(); say("This file couldn’t be played. Try a WAV, FLAC, OGG or MP3.");
+    stop(); say(e&&e.name==="NotAllowedError"?"Tab capture was cancelled or isn’t allowed here.":"Tab audio couldn’t be captured.");
   }
 }
 
@@ -485,6 +526,8 @@ document.querySelectorAll(".dd").forEach(wireMenu);
 document.addEventListener("click",closeMenus);
 document.addEventListener("keydown",e=>{if(e.key==="Escape")closeMenus()});
 $("open").addEventListener("click",()=>$("file").click());
+$("tab").addEventListener("click",connectTabAudio);
+if(!TAB_OK)$("tab").hidden=true;                                // no tab capture on phones / unsupported browsers
 $("file").addEventListener("change",e=>{const f=e.target.files[0];if(f)loadFile(f);e.target.value=""});
 $("stop").addEventListener("click",()=>{stop();say("")});
 $("volume").addEventListener("input",e=>{volume=+e.target.value;if(gain)gain.gain.value=volume});
