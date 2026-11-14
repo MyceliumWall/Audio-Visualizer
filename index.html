@@ -154,7 +154,10 @@ async function connectTabAudio(){
     playing=true; bars.fill(0); sgClear(); peak=1e-3;
     say("Capturing tab audio");
   }catch(e){
-    stop(); say(e&&e.name==="NotAllowedError"?"Tab capture was cancelled or isn’t allowed here.":"Tab audio couldn’t be captured.");
+    console.error("Tab capture failed",e);
+    stop();
+    const d=e?(e.name||"Error")+(e.message?": "+e.message:""):"unknown error";
+    say(e&&e.name==="NotAllowedError"?"Tab capture was cancelled or isn’t allowed here ("+d+")":"Tab audio couldn’t be captured ("+d+")");
   }
 }
 
